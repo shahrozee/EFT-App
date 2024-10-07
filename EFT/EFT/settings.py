@@ -31,6 +31,8 @@ ALLOWED_HOSTS = ['*']
 # Application definition
 
 INSTALLED_APPS = [
+    "admin_interface",
+    "colorfield",
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -40,7 +42,7 @@ INSTALLED_APPS = [
     'EFTApp',
     'rest_framework',
     'django.contrib.sites',
-    # 'django_rest_passwordreset',
+    'django_rest_passwordreset',
     'corsheaders',
     'rest_framework_simplejwt.token_blacklist',
 ]
