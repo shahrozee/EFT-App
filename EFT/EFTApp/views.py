@@ -1,31 +1,25 @@
 import io
 import random
-
 from PIL import Image
-from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.mail import send_mail, EmailMessage, EmailMultiAlternatives
-from django.db import connections, transaction
+from django.db.models import Count
 from django.shortcuts import get_object_or_404, render
-from django.utils.dateparse import parse_date
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.contrib.auth import authenticate, login, logout
-from datetime import datetime, timedelta
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
-from django.db.models import Count
 from rest_framework.exceptions import ValidationError
 from rest_framework import status, filters, viewsets, generics
-from django.http import JsonResponse
-import requests
-from rest_framework.decorators import action
+from django.http import JsonResponse, Http404
 from rest_framework.response import Response
-import os
 from .serializers import *
 
 
 class LoginViewSet(viewsets.ViewSet):
+    permission_classes = [AllowAny]
+
     def create(self, request):
         email = request.data.get("email")
         password = request.data.get("password")
@@ -44,30 +38,41 @@ class LoginViewSet(viewsets.ViewSet):
         user = CustomUser.objects.filter(email=email).first()
         if user and user.check_password(password):
             user = authenticate(request, username=user.username, password=password)
-            login(request, user)
-            expiration_time = datetime.now() + timedelta(days=1)
-            refresh_expiration_time = datetime.now() + timedelta(days=6)
-            token = RefreshToken.for_user(user)
-            data = {
-                "refresh_token": str(token),
-                "access_token": str(token.access_token),
-                "refresh_token_expiry": refresh_expiration_time,
-                "access_token_expiry": expiration_time,
-                "id": user.id,
-                "username": user.username,
-                "user_email": user.email,
-                "first_name": user.first_name,
-                "last_name": user.last_name
-            }
-            return Response(
-                {"message": "Logged in successfully", "data": data},
-                status=status.HTTP_200_OK,
-            )
-        else:
-            return Response(
-                {"message": "Invalid username or password.", "data": {}},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            if user:
+                login(request, user)
+                token = RefreshToken.for_user(user)
+
+                # Retrieve the latest subscription
+                subscription = Subscription.objects.filter(user=user).order_by('-created_at').first()
+                subscription_data = SubscriptionDetailSerializer(subscription).data if subscription else None
+
+                # Determine isTrialValid status
+                is_trial_valid = None
+                if subscription and subscription.subscription == "free":
+                    if subscription.is_active and subscription.expiry_date >= timezone.now().date():
+                        is_trial_valid = True
+                    else:
+                        is_trial_valid = False
+
+                data = {
+                    "refresh_token": str(token),
+                    "access_token": str(token.access_token),
+                    "id": user.id,
+                    "username": user.username,
+                    "user_email": user.email,
+                    "name": user.name,
+                    "subscription": subscription_data,
+                    "isTrialValid": is_trial_valid,
+                    "image": request.build_absolute_uri(user.image.url) if user.image else None
+                }
+                return Response(
+                    {"message": "Logged in successfully", "data": data},
+                    status=status.HTTP_200_OK,
+                )
+        return Response(
+            {"message": "Invalid username or password.", "data": {}},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
 
 class UserSignupViewSet(viewsets.ModelViewSet):
@@ -102,12 +107,18 @@ class UserSignupViewSet(viewsets.ModelViewSet):
         return self.update(request, *args, **kwargs)  # Same as update for this case
 
     def destroy(self, request, *args, **kwargs):
-        user = self.get_object()  # Get the user instance
-        user.delete()
-        return Response(
-            {"message": "User deleted successfully."},
-            status=status.HTTP_204_NO_CONTENT,
-        )
+        try:
+            user = self.get_object()  # Get the user instance
+            user.delete()
+            return Response(
+                {"message": "User deleted successfully."},
+                status=status.HTTP_204_NO_CONTENT,
+            )
+        except Http404:
+            return Response(
+                {"message": "User not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
     def get_object(self):
         user_id = self.kwargs.get('pk')
@@ -237,7 +248,7 @@ class PasswordResetView(APIView):
         user.uid = code
         user.save()
 
-        reset_url = f"https://emdradmin.pythonanywhere.com/mindmend/reset-password/form/{code}/"
+        reset_url = f"http://127.0.0.1:8000/EFT/reset-password/form/{code}/"
 
         text_content = f"Please click the following link to reset your password: {reset_url}"
         html_content = f"""
@@ -364,7 +375,6 @@ class UserTherapyInfoAPIView(APIView):
             scores = serializer.save(user=request.user)
             if 'selected_emotions' in request_data:
                 scores.selected_emotions.set(request_data['selected_emotions'])
-                # Ensure the score record reflects the latest emotions
                 scores.create_score_record()
             return Response(
                 {"message": "User therapy info created successfully.", "data": serializer.data},
@@ -374,9 +384,6 @@ class UserTherapyInfoAPIView(APIView):
             {"message": "Failed to create user therapy info.", "data": serializer.errors},
             status=status.HTTP_400_BAD_REQUEST
         )
-
-
-from django.db.models import Count
 
 
 class UserScoreRecordsViewSet(viewsets.ViewSet):
@@ -453,6 +460,7 @@ class UserProfileUpdateAPIView(APIView):
 
 class GoogleLogin(APIView):
     permission_classes = [AllowAny]
+
     def post(self, request):
         email = request.data.get('email')
         name = request.data.get('name')
